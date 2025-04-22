@@ -7,24 +7,27 @@ use reqwest::header;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::env;
+use std::fs;
 use std::fs::read_to_string;
-use std::iter::Iterator;
 use std::path::Path;
 use std::time::Duration;
-use std::{env, fs};
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:112.0) Gecko/20100101 Firefox/132.0";
+
 #[derive(Debug, Deserialize)]
 struct Repo {
     owner: String,
     repo: String,
-    path: Option<String>,
+    path: Option<String>,  // default path from TOML
 }
+
 #[derive(Debug, Deserialize)]
 struct Committer {
     name: String,
     email: String,
 }
+
 #[derive(Debug, Deserialize)]
 struct Config {
     token: String,
@@ -34,19 +37,29 @@ struct Config {
 }
 
 fn main() -> anyhow::Result<()> {
+    // load config
     let config_path = home_dir()
         .ok_or(anyhow!("Can't get home directory"))?
         .join(".config/pic_to_github.toml");
     let config: Config = toml::from_str(&read_to_string(config_path)?)?;
 
+    // build HTTP client
     let client = build_client(&config.token)?;
-    let repo_url = build_repo_url(&config.repo);
+
+    // determine repository base URL with path override
+    let default_path = config.repo.path.clone().unwrap_or_default();
+    let override_path = env::var("REPO_PATH").unwrap_or_else(|_| default_path.clone());
+    let repo_url = build_repo_url(&config.repo.owner, &config.repo.repo, &override_path);
+
+    // optional proxy prefix
     let github_proxy = config.github_proxy.unwrap_or_default();
 
+    // collect image paths from CLI
     let command_line_args: Vec<String> = env::args().skip(1).collect();
     if command_line_args.is_empty() {
         return Err(anyhow!("No image paths provided"));
     }
+
     for img_path in command_line_args.into_iter() {
         let url = format!(
             "{}/{}{}",
@@ -57,12 +70,12 @@ fn main() -> anyhow::Result<()> {
 
         let content = encode_img(&img_path);
         let data = json!({
-        "message"  : "add image",
-        "committer": {
-                "name" : config.committer.name,
-                "email": config.committer.email
-                },
-        "content"  : content
+            "message": "add image",
+            "committer": {
+                "name": config.committer.name,
+                "email": config.committer.email,
+            },
+            "content": content
         });
 
         let rsp = client.put(&url).json(&data).send()?.json::<Value>()?;
@@ -71,6 +84,7 @@ fn main() -> anyhow::Result<()> {
             .ok_or(anyhow!("commit failed: {url} {rsp}"))?;
         println!("{github_proxy}{download_url}");
     }
+
     Ok(())
 }
 
@@ -109,13 +123,11 @@ fn get_suffix(img_path: &str) -> String {
         .map_or(String::new(), |ext| format!(".{}", ext.to_string_lossy()))
 }
 
-fn build_repo_url(repo: &Repo) -> String {
+fn build_repo_url(owner: &str, repo: &str, path: &str) -> String {
     format!(
         "https://api.github.com/repos/{}/{}/contents/{}",
-        repo.owner,
-        repo.repo,
-        repo.path.as_deref().unwrap_or_default()
+        owner,
+        repo,
+        path.trim_end_matches('/')
     )
-    .trim_end_matches("/")
-    .to_owned()
 }
